@@ -84,13 +84,12 @@ def get_day_type(d: int, year: int, month: int) -> str:
     return "normal"
 
 # ══════════════════════════════════════════════════════
-# DETERMINISTIC STAGE-BASED SCHEDULER
+# ROBUST STAGE-BASED SCHEDULER
 # ══════════════════════════════════════════════════════
 
 def build_schedule_deterministic(doctors, year, month, personal_blocks, shift_rules):
     num_days = calendar.monthrange(year, month)[1]
     
-    # 1. מיפוי סופי שבוע (צמדי שישי-שבת)
     weekend_blocks = []
     for d in range(1, num_days):
         if get_day_type(d, year, month) == "fri" and (d+1) <= num_days:
@@ -102,40 +101,14 @@ def build_schedule_deterministic(doctors, year, month, personal_blocks, shift_ru
         weekend_days.add(s)
     weekdays = sorted(list(set(range(1, num_days + 1)) - weekend_days))
 
-    # הגדרת אילוצי מכסה קשיחים לחודש של 30 יום ו-11 רופאים
     total_slots = num_days * 3
     heavy_slots = num_days * 2
-    light_slots = num_days
     
     max_total_cap = (total_slots // len(doctors)) + (1 if total_slots % len(doctors) != 0 else 0)
     max_heavy_cap = (heavy_slots // len(doctors)) + (1 if heavy_slots % len(doctors) != 0 else 0)
-    max_light_cap = (light_slots // len(doctors)) + (1 if light_slots % len(doctors) != 0 else 0)
+    max_light_cap = (num_days // len(doctors)) + (1 if num_days % len(doctors) != 0 else 0)
 
-    # מערך איטרציות עם שבירת שוויון אקראית קלה למציאת פתרון חוקי תחת חסימות
-    for attempt in range(1000):
+    # נגדיל את מספר הניסיונות ונטהר אילוצים חמדניים מדי בשלב הסופ"ש
+    for attempt in range(3000):
         assignment = {}
         cnt1, cnt2, cnt3 = defaultdict(int), defaultdict(int), defaultdict(int)
-        heavy_weekend_assigned = defaultdict(int)
-        any_weekend_assigned = defaultdict(int)
-        
-        success = True
-        
-        # שלב א': שיבוץ סופי שבוע - טורים 1 ו-2 (כבד)
-        # כל רופא יכול לקבל לכל היותר סופ"ש כבד אחד!
-        for fri, sat in weekend_blocks:
-            for shift in [1, 2]:
-                cands = []
-                for d in doctors:
-                    if shift not in shift_rules.get(d, [1,2,3]): continue
-                    if fri in personal_blocks.get(d, []) or sat in personal_blocks.get(d, []): continue
-                    if heavy_weekend_assigned[d] >= 1: continue # חסימה אבסולוטית של כפל סופ"ש כבד
-                    
-                    if (cnt1[d] + cnt2[d] + 2) > max_heavy_cap: continue
-                    if (cnt1[d] + cnt2[d] + cnt3[d] + 2) > max_total_cap: continue
-                    cands.append(d)
-                
-                if not cands:
-                    success = False
-                    break
-                
-                # בחירה במי שיש לו הכי פחות סופ
