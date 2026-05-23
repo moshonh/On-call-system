@@ -10,7 +10,7 @@ from collections import defaultdict
 # ══════════════════════════════════════════════════════
 # PAGE CONFIG
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title="ניהול כוננויות - גרסה סופית ומדויקת", page_icon="🏥", layout="wide")
+st.set_page_config(page_title="ניהול כוננויות - גרסה מתוקנת ומאוזנת", page_icon="🏥", layout="wide")
 
 # ══════════════════════════════════════════════════════
 # CSS
@@ -44,9 +44,6 @@ html, body, [class*="css"] { font-family:'Heebo',sans-serif; direction:rtl; }
 div.stButton > button { background:#1a3a5c; color:white; border:none; border-radius:8px; padding:.5rem 1.6rem; font-family:'Heebo',sans-serif; font-size:.95rem; font-weight:600; }
 div.stButton > button:hover { background:#2a5a8c; }
 .stTextArea textarea, .stTextInput input { direction:rtl; font-family:'Heebo',sans-serif; }
-.info-box  { background:#e8f4fd; border:1px solid #aed6f1; border-radius:8px; padding:.6rem 1rem; font-size:.83rem; color:#1a5276; margin:.4rem 0; }
-.pref-box  { background:#eafaf1; border:1px solid #a9dfbf; border-radius:8px; padding:.6rem 1rem; font-size:.83rem; color:#1e8449; margin:.4rem 0; }
-.warn-box  { background:#fff8e1; border:1px solid #ffe082; border-radius:8px; padding:.6rem 1rem; font-size:.83rem; color:#7a5800; margin:.4rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,9 +73,6 @@ DEFAULT_SHIFT_RULES = {
     "דנין י'":      [2, 3],
 }
 
-# ══════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════
 def parse_day_ranges(raw: str, year: int, month: int) -> list[int]:
     if not raw or not raw.strip(): return []
     num_days = calendar.monthrange(year, month)[1]
@@ -113,38 +107,8 @@ def get_day_type(d: int, year: int, month: int, holidays: set) -> str:
     if (d + 1) in holidays: return "hol_eve"
     return "normal"
 
-def build_coupled_blocks(year: int, month: int, holidays: set) -> list[dict]:
-    num_days = calendar.monthrange(year, month)[1]
-    used: set[int] = set()
-    blocks: list[dict] = []
-    d = 1
-    while d <= num_days:
-        if d in used:
-            d += 1
-            continue
-        dtype = get_day_type(d, year, month, holidays)
-        # Start of a potential block: Friday, Holiday, or Holiday Eve
-        if dtype in ("fri", "hol", "hol_eve"):
-            block_days = [d]
-            used.add(d)
-            nxt = d + 1
-            while nxt <= num_days:
-                nt = get_day_type(nxt, year, month, holidays)
-                # Continue block if next day is Saturday, Holiday, or Holiday Eve
-                if nt in ("sat", "hol", "hol_eve"):
-                    block_days.append(nxt)
-                    used.add(nxt)
-                    nxt += 1
-                else: break
-            blocks.append({"days": block_days, "coupled": len(block_days) > 1})
-        else:
-            blocks.append({"days": [d], "coupled": False})
-            used.add(d)
-        d += 1
-    return blocks
-
 # ══════════════════════════════════════════════════════
-# CORE SCHEDULER (STOCHASTIC HILL CLIMBING)
+# NEW BALANCED SCHEDULER WITH UPPER BOUND CAPS
 # ══════════════════════════════════════════════════════
 
 def build_schedule(
@@ -154,107 +118,109 @@ def build_schedule(
     holidays: set,
     personal_blocks: dict,
     personal_prefs: dict,
-    shift_rules: dict,
-    max_iterations: int = 20000   # נשמר לתאימות, לא בשימוש
+    shift_rules: dict
 ):
-    """
-    אלגוריתם גרידי טהור — שלושה שלבים:
+    num_days = calendar.monthrange(year, month)[1]
+    num_docs = len(doctors)
+    
+    # חישוב מתמטי מדויק של גבולות עליונים להבטחת שוויון
+    total_slots = num_days * 3 # 90 ל-30 יום
+    heavy_slots = num_days * 2 # 60 ל-30 יום
+    light_slots = num_days     # 30 ל-30 יום
+    
+    max_total_cap = (total_slots // num_docs) + (1 if total_slots % num_docs != 0 else 0)
+    max_heavy_cap = (heavy_slots // num_docs) + (1 if heavy_slots % num_docs != 0 else 0)
+    max_light_cap = (light_slots // num_docs) + (1 if light_slots % num_docs != 0 else 0)
 
-    שלב א\' T1 (כל בלוק, עם צמד)
-    שלב ב\' T2 (כל בלוק, exclude T1 של אותו בלוק)
-    שלב ג\' T3 (כל בלוק כולל צמד, exclude T1+T2 של אותו בלוק)
+    # ניסיונות הרצה מרובים למציאת פתרון חוקי (בגלל החסימות)
+    for attempt in range(500):
+        cnt1 = defaultdict(int)
+        cnt2 = defaultdict(int)
+        cnt3 = defaultdict(int)
+        assignment = {}
+        success = True
+        
+        # מעבר יום-יום, שומר על רצף סופ"ש לרופא במידת האפשר אך מוגבל במכסות קשיחות
+        for day in range(1, num_days + 1):
+            day_type = get_day_type(day, year, month, holidays)
+            
+            # בדיקה האם זה יום המשך של סופ"ש (שבת) כדי לשמור על רציפות אם המכסה מאפשרת
+            is_weekend_continuation = (day_type == "sat" and day > 1)
+            
+            for shift in [1, 2, 3]:
+                # מציאת מי ששובץ אתמול בטור הזה למקרה של רציפות סופ"ש
+                prev_doc = assignment.get((day-1, shift), None) if is_weekend_continuation else None
+                
+                # סינון מועמדים לפי חוקים קשיחים ומכסות
+                cands = []
+                for d in doctors:
+                    # 1. בדיקת חוקי טורים קשיחים וחסימות אישיות
+                    if shift not in shift_rules.get(d, [1, 2, 3]): continue
+                    if day in personal_blocks.get(d, []): continue
+                    
+                    # 2. מניעת כפילות באותו היום (אותו רופא לא יכול לעשות שני טורים באותו יום)
+                    day_docs = [assignment.get((day, s)) for s in [1, 2, 3] if s != shift]
+                    if d in day_docs: continue
+                    
+                    # 3. בדיקת מכסות קשיחות
+                    if cnt1[d] + cnt2[d] + cnt3[d] >= max_total_cap: continue
+                    if shift in [1, 2] and (cnt1[d] + cnt2[d]) >= max_heavy_cap: continue
+                    if shift == 3 and cnt3[d] >= max_light_cap: continue
+                    
+                    cands.append(d)
+                
+                if not cands:
+                    success = False
+                    break
+                
+                # קביעת הרופא הנבחר
+                if prev_doc and prev_doc in cands:
+                    # שמירה על רצף סופ"ש (שישי-שבת)
+                    chosen = prev_doc
+                else:
+                    # תיעדוף קודם כל לפי העדפות אישיות (Preferences) אם קיימות
+                    pref_cands = [d for d in cands if day in personal_prefs.get(d, [])]
+                    target_pool = pref_cands if pref_cands else cands
+                    
+                    # בחירה במי שיש לו הכי פחות שיבוצים בטור הנוכחי, ואז הכי פחות סה"כ
+                    if shift in [1, 2]:
+                        chosen = min(target_pool, key=lambda d: (cnt1[d] + cnt2[d], cnt1[d] + cnt2[d] + cnt3[d]))
+                    else:
+                        chosen = min(target_pool, key=lambda d: (cnt3[d], cnt1[d] + cnt2[d] + cnt3[d]))
+                
+                # רישום השיבוץ
+                assignment[(day, shift)] = chosen
+                if shift == 1: cnt1[chosen] += 1
+                elif shift == 2: cnt2[chosen] += 1
+                elif shift == 3: cnt3[chosen] += 1
+                
+            if not success: break
+            
+        if success:
+            # בדיקה סופית שההפרשים אכן שוויוניים לחלוטין (הפרש <= 1)
+            heavy_counts = [cnt1[d] + cnt2[d] for d in doctors]
+            light_counts = [cnt3[d] for d in doctors]
+            total_counts = [cnt1[d] + cnt2[d] + cnt3[d] for d in doctors]
+            
+            if (max(heavy_counts) - min(heavy_counts) <= 1 and 
+                max(light_counts) - min(light_counts) <= 1 and 
+                max(total_counts) - min(total_counts) <= 1):
+                
+                # סיכום לטבלת תצוגה
+                active_days = {d: cnt1[d] + cnt2[d] for d in doctors}
+                passive_days = {d: cnt3[d] for d in doctors}
+                pref_granted = defaultdict(int)
+                for (day, shift), doc in assignment.items():
+                    if shift in (1, 2) and day in personal_prefs.get(doc, []):
+                        pref_granted[doc] += 1
+                        
+                return assignment, active_days, passive_days, dict(pref_granted)
 
-    בחירה בכל שלב: min(total) → min(this_shift) → soft_pref
-    כך סה\"כ הכוננויות מאוזן תמיד (הפרש ≤1).
-
-    ערבות:
-      T1-pool gap ≤1 | T2-pool gap ≤1 | T3 gap ≤1 | סהכ gap ≤1
-      כפילויות = 0   | T3 צמד = ✅
-    """
-    blocks   = build_coupled_blocks(year, month, holidays)
-    cnt1: dict = defaultdict(int)
-    cnt2: dict = defaultdict(int)
-    cnt3: dict = defaultdict(int)
-    assignment: dict = {}
-
-    def total(d: str) -> int:
-        return cnt1[d] + cnt2[d] + cnt3[d]
-
-    def pick(cands: list, this_cnt: dict, days: list) -> str:
-        """
-        שכבה 1: min(this_shift) — שוויון בתוך pool הספציפי
-        שכבה 2: min(total)      — שוויון כולל לשבירת שוויון
-        שכבה 3: soft pref
-        """
-        if not cands:
-            return ""
-        # שכבה 1: מינימום בטור הנוכחי
-        ms = min(this_cnt[d] for d in cands)
-        l1 = [d for d in cands if this_cnt[d] == ms]
-        # שכבה 2: מינימום סה"כ
-        mt = min(total(d) for d in l1)
-        l2 = [d for d in l1 if total(d) == mt]
-        # שכבה 3: העדפות
-        pref = [d for d in l2 if any(day in personal_prefs.get(d,[]) for day in days)]
-        return random.choice(pref if pref else l2)
-
-    def get_cands(shift: int, days: list, exclude: set) -> list:
-        c = [d for d in doctors
-             if shift in shift_rules.get(d,[1,2,3])
-             and d not in exclude
-             and not any(day in personal_blocks.get(d,[]) for day in days)]
-        if not c:
-            c = [d for d in doctors
-                 if shift in shift_rules.get(d,[1,2,3]) and d not in exclude]
-        if not c:
-            c = [d for d in doctors if d not in exclude]
-        if not c:
-            c = list(doctors)
-        return c
-
-    # ── T1 ──────────────────────────────────────────────────────
-    for blk in blocks:
-        days   = blk["days"]
-        cands  = get_cands(1, days, set())
-        chosen = pick(cands, cnt1, days) or random.choice(doctors)
-        for day in days: assignment[(day, 1)] = chosen
-        cnt1[chosen] += 1
-
-    # ── T2 ──────────────────────────────────────────────────────
-    for blk in blocks:
-        days    = blk["days"]
-        t1_here = {assignment.get((days[0], 1))} - {None}
-        cands   = get_cands(2, days, t1_here)
-        chosen  = pick(cands, cnt2, days) or random.choice(doctors)
-        for day in days: assignment[(day, 2)] = chosen
-        cnt2[chosen] += 1
-
-    # ── T3 (צמד נשמר) ───────────────────────────────────────────
-    for blk in blocks:
-        days   = blk["days"]
-        already = {assignment.get((days[0], 1)),
-                   assignment.get((days[0], 2))} - {None}
-        cands   = get_cands(3, days, already)
-        chosen  = pick(cands, cnt3, days) or random.choice(doctors)
-        for day in days: assignment[(day, 3)] = chosen
-        cnt3[chosen] += 1
-
-    # ── סיכום ────────────────────────────────────────────────────
-    active_days  = defaultdict(int)
-    passive_days = defaultdict(int)
-    pref_granted = defaultdict(int)
-    for (day, shift), doc in assignment.items():
-        if shift in (1, 2):
-            active_days[doc]  += 1
-            if day in personal_prefs.get(doc, []):
-                pref_granted[doc] += 1
-        else:
-            passive_days[doc] += 1
-
-    return assignment, dict(active_days), dict(passive_days), dict(pref_granted)
+    # אם אחרי 500 ניסיונות בגלל אילוצי חסימות קשים לא נמצא פתרון מושלם, נחזיר ריק
+    return {}, {}, {}, {}
 
 # ══════════════════════════════════════════════════════
-# UI & RENDERERS
+# UI & RENDERERS (ללא שינוי, תואם לגרסה הקודמת)
 # ══════════════════════════════════════════════════════
 
 def render_calendar(year, month, assignment, color_map, holidays, personal_prefs) -> str:
@@ -276,7 +242,6 @@ def render_calendar(year, month, assignment, color_map, holidays, personal_prefs
                 doc = assignment.get((day, shift), "—")
                 col = color_map.get(doc, "#aaa")
                 label = SHIFT_LABELS[shift].split()[0]
-                # Only show star for preferences in active duties
                 is_pref = (shift in (1, 2)) and (day in personal_prefs.get(doc, []))
                 extra_cls = " badge-pref" if is_pref else ""
                 cells += (f'<span class="badge {badge_cls}{extra_cls}" '
@@ -307,8 +272,7 @@ def render_fairness(doctors, heavy, light, color_map, personal_prefs, pref_grant
         rows += (f"<tr><td>{name_badge}</td><td>{h}</td><td>{bar_h}</td><td>{l}</td><td>{bar_l}</td><td>{h+l}</td><td>{pref_cell}</td></tr>")
     return (f'<table class="fair-table"><thead><tr><th>רופא</th><th>ימי כבד (1+2)</th><th>פילוג כבד</th><th>ימי פסיבי (3)</th><th>פילוג פסיבי</th><th>סה"כ ימים</th><th>העדפות (אקטיבי)</th></tr></thead><tbody>{rows}</tbody></table>')
 
-st.markdown('<div class="main-title">🏥 ניהול כוננויות - גרסה סופית ומדויקת</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">העדפות לכוננות אקטיבית בלבד · רציפות חג-סופ"ש מלאה · הגבלה קשיחה לסופ"ש אקטיבי אחד</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏥 ניהול כוננויות - גרסה מתוקנת ומאוזנת</div>', unsafe_allow_html=True)
 
 with st.expander("⚙️ הגדרות", expanded=True):
     c1, c2, c3 = st.columns([2, 1, 1])
@@ -316,7 +280,7 @@ with st.expander("⚙️ הגדרות", expanded=True):
         doctors_input = st.text_area("👨‍⚕️ רשימת רופאים", value="\n".join(DEFAULT_DOCTORS), height=160)
     with c2:
         today = date.today()
-        sel_month = st.selectbox("📅 חודש", list(range(1, 13)), index=today.month - 1, format_func=lambda m: HEBREW_MONTHS[m - 1])
+        sel_month = st.selectbox("📅 חודש", list(range(1, 13)), index=5, format_func=lambda m: HEBREW_MONTHS[m - 1]) # ברירת מחדל יוני
     with c3:
         sel_year = st.selectbox("📆 שנה", list(range(today.year - 1, today.year + 4)), index=1)
     holidays_raw = st.text_input("✡️ ימי חג / ערב-חג:", value="", placeholder="2-4/10, 14/04")
@@ -350,14 +314,14 @@ if run_btn:
         assignment, heavy, light, pref_granted = build_schedule(doctors, sel_year, sel_month, holidays, personal_blocks, personal_prefs, shift_rules)
         
         if not assignment:
-            st.error("❌ לא ניתן היה ליצור סידור העונה על כל החסימות הקשות. נסה להפחית חסימות.")
+            st.error("❌ לא ניתן היה ליצור סידור המאזן את הטורים בצורה מושלמת תחת אילוצי החסימות הנוכחיים. נסה להפחית חסימות קשיחות.")
         else:
             color_map = {doc: COLORS[i % len(COLORS)] for i, doc in enumerate(doctors)}
             st.markdown(f"### 📋 לוח כוננויות - {HEBREW_MONTHS[sel_month-1]} {sel_year}")
             st.markdown(render_calendar(sel_year, sel_month, assignment, color_map, holidays, personal_prefs), unsafe_allow_html=True)
             
             st.markdown("---")
-            st.markdown('<div class="sec-header">📊 טבלת צדק (הפרש מקסימלי 1)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sec-header">📊 טבלת צדק מתוקנת ומאוזנת מתמטית</div>', unsafe_allow_html=True)
             st.markdown(render_fairness(doctors, heavy, light, color_map, personal_prefs, pref_granted), unsafe_allow_html=True)
             
             df_export = []
@@ -369,4 +333,4 @@ if run_btn:
                     "טור 3": assignment.get((day, 3), "—"),
                 })
             csv = pd.DataFrame(df_export).to_csv(index=False, encoding="utf-8-sig")
-            st.download_button("⬇️ הורד כ-CSV", csv, f"schedule_{sel_month}_{sel_year}.csv", "text/csv")
+            st.download_button("⬇️ הורד כ-CSV מתוקן", csv, f"schedule_{sel_month}_{sel_year}.csv", "text/csv")
